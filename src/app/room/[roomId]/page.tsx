@@ -22,7 +22,7 @@ interface Message {
     id: string;
     role: 'user' | 'ai';
     content: string;
-    author: string;
+    sender: string;
     timestamp: any;
 }
 
@@ -40,8 +40,20 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     const [projectData, setProjectData] = useState<ProjectData>({ turnCount: 0, maxTurn: 10, isFinished: false });
     const [inputValue, setInputValue] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [isProcessing, setIsProcessing] = useState(false); // New strict guard for 429 prevention
     const isInitializingRef = useRef(false);
     const scrollRef = useRef<HTMLDivElement>(null);
+
+    // Load nickname from sessionStorage on mount
+    useEffect(() => {
+        if (typeof window !== 'undefined') {
+            const savedNickname = sessionStorage.getItem('story_nickname');
+            if (savedNickname) {
+                setNickname(savedNickname);
+                setIsEntered(true);
+            }
+        }
+    }, []);
 
     // 1. Sync Project Data & Messages
     useEffect(() => {
@@ -59,8 +71,8 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             })) as Message[];
             setMessages(msgs);
 
-            // Initialize if empty
-            if (msgs.length === 0 && !isInitializingRef.current) {
+            // Initialize if empty - Strict Guard
+            if (msgs.length === 0 && !isInitializingRef.current && !isProcessing) {
                 initializeStoryIfEmpty();
             }
         });
@@ -86,8 +98,9 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     }, [isEntered, roomId]);
 
     const initializeStoryIfEmpty = async () => {
-        if (isInitializingRef.current) return;
+        if (isInitializingRef.current || isProcessing) return;
         isInitializingRef.current = true;
+        setIsProcessing(true);
         setIsLoading(true);
         try {
             console.log(`${roomId} 이야기가 비어있어 첫 문장을 생성합니다...`);
@@ -106,23 +119,25 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             await addDoc(collection(db, 'projects', roomId, 'stories'), {
                 role: 'ai',
                 content: aiText,
-                author: 'AI 작가님',
+                sender: 'AI 작가님',
                 timestamp: serverTimestamp(),
             });
-            console.log('첫 문장 생성 완료.');
         } catch (error) {
             console.error('Initialization Error:', error);
-            setTimeout(() => { isInitializingRef.current = false; }, 60000);
+            // On error, allow retry after some time
+            setTimeout(() => { isInitializingRef.current = false; }, 30000);
         } finally {
+            setIsProcessing(false);
             setIsLoading(false);
         }
     };
 
     const handleSend = async () => {
-        if (!inputValue.trim() || isLoading || projectData.isFinished) return;
+        if (!inputValue.trim() || isProcessing || projectData.isFinished) return;
 
         const currentInput = inputValue;
         setInputValue('');
+        setIsProcessing(true);
         setIsLoading(true);
 
         try {
@@ -132,7 +147,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             await addDoc(collection(db, 'projects', roomId, 'stories'), {
                 role: 'user',
                 content: currentInput,
-                author: nickname,
+                sender: nickname,
                 timestamp: serverTimestamp(),
             });
             await updateDoc(projectRef, { turnCount: increment(1) });
@@ -161,7 +176,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             await addDoc(collection(db, 'projects', roomId, 'stories'), {
                 role: 'ai',
                 content: aiText,
-                author: 'AI 작가님',
+                sender: 'AI 작가님',
                 timestamp: serverTimestamp(),
             });
 
@@ -171,7 +186,9 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
         } catch (error) {
             console.error('Relay Mode Error:', error);
+            // If it's a 429, we might want to alert the user or just log it
         } finally {
+            setIsProcessing(false);
             setIsLoading(false);
         }
     };
@@ -182,23 +199,38 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         }
     }, [messages, isLoading]);
 
+    const handleEnter = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (nickname.trim()) {
+            sessionStorage.setItem('story_nickname', nickname.trim());
+            setIsEntered(true);
+        }
+    };
+
     if (!isEntered) {
         return (
-            <div className="flex h-screen w-screen items-center justify-center bg-[#FDFCF0]">
-                <div className="z-10 w-full max-w-md p-8 bg-white rounded-3xl shadow-2xl border border-[#F0E6D2] text-center">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
+                <div className="w-full max-w-md p-8 bg-white rounded-3xl shadow-2xl border border-[#F0E6D2] text-center animate-in fade-in zoom-in duration-300">
                     <div className="mb-6 inline-flex p-4 bg-blue-50 rounded-full text-blue-600">
                         <User size={40} />
                     </div>
                     <h2 className="text-xl font-bold text-[#5C544B] mb-2">어떤 이름을 쓸까요?</h2>
                     <p className="text-[#8B8378] mb-8 text-sm">친구들이 알아볼 수 있게 멋진 이름을 써줘!</p>
-                    <form onSubmit={(e) => { e.preventDefault(); if (nickname.trim()) setIsEntered(true); }} className="space-y-4">
-                        <input type="text" value={nickname} onChange={(e) => setNickname(e.target.value)}
-                            placeholder="너의 멋진 이름을 알려줘!"
+                    <form onSubmit={handleEnter} className="space-y-4">
+                        <input
+                            type="text"
+                            value={nickname}
+                            onChange={(e) => setNickname(e.target.value)}
+                            placeholder="이름을 입력해주세요"
                             className="w-full px-6 py-4 bg-[#F9F7F2] border-2 border-[#E5E1D1] rounded-2xl outline-none focus:border-blue-400 transition-colors text-center font-bold text-[#4A443D]"
-                            autoFocus />
-                        <button type="submit" disabled={!nickname.trim()}
-                            className="w-full bg-blue-500 text-white font-bold py-4 rounded-2xl hover:bg-blue-600 active:scale-95 transition-all shadow-lg flex items-center justify-center gap-2">
-                            이야기방 입장하기 <ArrowRight size={20} />
+                            autoFocus
+                        />
+                        <button
+                            type="submit"
+                            disabled={!nickname.trim()}
+                            className="w-full bg-blue-500 text-white font-bold py-4 rounded-2xl hover:bg-blue-600 active:scale-95 transition-all shadow-lg flex items-center justify-center gap-2 disabled:bg-gray-300"
+                        >
+                            입장하기 <ArrowRight size={20} />
                         </button>
                         <Link href="/" className="block text-sm text-[#8B8378] hover:text-blue-500 underline mt-4">
                             대기실로 돌아가기
@@ -274,14 +306,14 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
                 <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4 bg-[#F9F7F2]">
                     {messages.map((msg) => (
-                        <div key={msg.id} className={`flex ${msg.role === 'user' ? (msg.author === nickname ? 'justify-end' : 'justify-start') : 'justify-start'}`}>
-                            <div className={`flex max-w-[85%] gap-2 ${msg.role === 'user' && msg.author === nickname ? 'flex-row-reverse' : ''}`}>
+                        <div key={msg.id} className={`flex ${msg.role === 'user' ? (msg.sender === nickname ? 'justify-end' : 'justify-start') : 'justify-start'}`}>
+                            <div className={`flex max-w-[85%] gap-2 ${msg.role === 'user' && msg.sender === nickname ? 'flex-row-reverse' : ''}`}>
                                 <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 shadow-sm text-[10px] font-bold ${msg.role === 'ai' ? 'bg-yellow-100 text-yellow-600' : 'bg-blue-100 text-blue-500'}`}>
-                                    {msg.role === 'ai' ? <Sparkles size={16} /> : msg.author[0]}
+                                    {msg.role === 'ai' ? <Sparkles size={16} /> : msg.sender[0]}
                                 </div>
                                 <div>
-                                    <div className={`text-[10px] mb-1 text-[#8B8378] ${msg.role === 'user' && msg.author === nickname ? 'text-right' : 'text-left'}`}>{msg.author}</div>
-                                    <div className={`p-3 rounded-2xl shadow-sm text-sm leading-relaxed ${msg.role === 'user' && msg.author === nickname ? 'bg-blue-500 text-white rounded-tr-none' : 'bg-white text-[#4A443D] border border-[#F0E6D2] rounded-tl-none'}`}>
+                                    <div className={`text-[10px] mb-1 text-[#8B8378] ${msg.role === 'user' && msg.sender === nickname ? 'text-right' : 'text-left'}`}>{msg.sender}</div>
+                                    <div className={`p-3 rounded-2xl shadow-sm text-sm leading-relaxed ${msg.role === 'user' && msg.sender === nickname ? 'bg-blue-500 text-white rounded-tr-none' : 'bg-white text-[#4A443D] border border-[#F0E6D2] rounded-tl-none'}`}>
                                         {msg.content}
                                     </div>
                                 </div>
@@ -308,12 +340,21 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                     ) : (
                         <>
                             <div className="relative flex items-center gap-2 bg-white rounded-2xl border border-[#D4CDB7] p-2 pr-3 shadow-md focus-within:ring-2 focus-within:ring-blue-200 transition-all">
-                                <input type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                                    placeholder={isLoading ? "AI 작가님이 생각 중이에요..." : "함께 이야기를 이어가요..."} disabled={isLoading}
-                                    className="flex-1 bg-transparent px-4 py-3 outline-none text-[#4A443D] placeholder-[#B4AD9F] disabled:opacity-50 font-medium" />
-                                <button onClick={handleSend} disabled={isLoading || !inputValue.trim()}
-                                    className="p-3 bg-blue-500 text-white rounded-xl hover:bg-blue-600 active:scale-95 transition-all shadow-md flex items-center justify-center disabled:bg-gray-300 disabled:scale-100">
-                                    <Send size={20} />
+                                <input
+                                    type="text"
+                                    value={inputValue}
+                                    onChange={(e) => setInputValue(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                                    placeholder={isProcessing ? "작가님이 답장 중이에요..." : "함께 이야기를 이어가요..."}
+                                    disabled={isProcessing}
+                                    className="flex-1 bg-transparent px-4 py-3 outline-none text-[#4A443D] placeholder-[#B4AD9F] disabled:opacity-50 font-medium"
+                                />
+                                <button
+                                    onClick={handleSend}
+                                    disabled={isProcessing || !inputValue.trim()}
+                                    className="p-3 bg-blue-500 text-white rounded-xl hover:bg-blue-600 active:scale-95 transition-all shadow-md flex items-center justify-center disabled:bg-gray-300 disabled:scale-100"
+                                >
+                                    {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
                                 </button>
                             </div>
                             <p className="mt-3 text-center text-[11px] text-[#B4AD9F] font-medium">친구들과 교대로 문장을 완성해보세요! ({projectData.turnCount}/{projectData.maxTurn})</p>
